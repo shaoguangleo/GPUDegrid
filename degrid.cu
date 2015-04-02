@@ -116,9 +116,15 @@ int w_comp_sub(const void* A, const void* B) {
    return 0;
 }
 template <class T,class Thalf>
-int w_comp_full(const void* A, const void* B) {
+int w_comp_submain(const void* A, const void* B) {
    int result = w_comp_sub<T,Thalf>(A,B);
    if (0==result) return w_comp_main<T,Thalf>(A,B);
+   else return result;
+}
+template <class T,class Thalf>
+int w_comp_mainsub(const void* A, const void* B) {
+   int result = w_comp_main<T,Thalf>(A,B);
+   if (0==result) return w_comp_sub<T,Thalf>(A,B);
    else return result;
 }
 int main(void) {
@@ -159,7 +165,7 @@ int main(void) {
       img[x+IMG_SIZE*IMG_SIZE].x = 0.0; img[x+IMG_SIZE*IMG_SIZE].y = 0.0;
    }
 
-   std::qsort(in, NPOINTS, sizeof(double2), w_comp_sub<double2,double>);
+   std::qsort(in, NPOINTS, sizeof(PRECISION2), w_comp_sub<PRECISION2,PRECISION>);
    
    degridGPU(out,in,NPOINTS,img,IMG_SIZE,gcf,GCF_DIM);
 #ifdef __CPU_CHECK

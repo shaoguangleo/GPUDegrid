@@ -23,12 +23,15 @@ __device__ int2 convert(int asize, int Qpx, float pin) {
    return make_int2(int(round), int(frac*Qpx));
 }
 
+//For easier templating
 __device__ double make_zero(double2* in) { return (double)0.0;}
 __device__ float make_zero(float2* in) { return (float)0.0;}
 
 template <int gcf_dim, class CmplxType>
-__global__ void degrid_kernel(CmplxType* out, CmplxType* in, size_t npts, CmplxType* img, 
-                              size_t img_dim, CmplxType* gcf) {
+__global__ void degrid_kernel(CmplxType* out, CmplxType* in, size_t npts, 
+                              CmplxType* img, size_t img_dim, CmplxType* gcf, 
+                              int xmin, int xmax, int ymin, int ymax) 
+{
    
    __shared__ CmplxType shm[1024/gcf_dim][gcf_dim+1];
    __shared__ CmplxType inbuff[32];
@@ -37,21 +40,23 @@ __global__ void degrid_kernel(CmplxType* out, CmplxType* in, size_t npts, CmplxT
    __syncthreads();
    for (int q=0;q<32;q++) {
       CmplxType inn = inbuff[q];
-      int sub_x = floorf(GCF_GRID*(inn.x-floorf(inn.x)));
-      int sub_y = floorf(GCF_GRID*(inn.y-floorf(inn.y)));
       int main_x = floorf(inn.x); 
       int main_y = floorf(inn.y); 
+      if (main_x <= xmin || main_x > xmax ||
+          main_y <= ymin || main_y > ymax ) continue;
+      int sub_x = floorf(GCF_GRID*(inn.x-floorf(inn.x)));
+      int sub_y = floorf(GCF_GRID*(inn.y-floorf(inn.y)));
       auto sum_r = make_zero(img);
       auto sum_i = make_zero(img);
       int a = threadIdx.x-gcf_dim/2;
       for(int b = threadIdx.y-gcf_dim/2;b<gcf_dim/2;b+=blockDim.y)
       {
-         auto r1 = img[main_x+a+img_dim*(main_y+b)].x; 
-         auto i1 = img[main_x+a+img_dim*(main_y+b)].y; 
-         auto r2 = __ldg(&gcf[gcf_dim*gcf_dim*(GCF_GRID*sub_y+sub_x) + 
-                        gcf_dim*b+a].x);
-         auto i2 = __ldg(&gcf[gcf_dim*gcf_dim*(GCF_GRID*sub_y+sub_x) + 
-                        gcf_dim*b+a].y);
+         auto r1 = __ldg(&img[main_x+a+img_dim*(main_y+b)].x); 
+         auto i1 = __ldg(&img[main_x+a+img_dim*(main_y+b)].y); 
+         auto r2 = gcf[gcf_dim*gcf_dim*(GCF_GRID*sub_y+sub_x) + 
+                        gcf_dim*b+a].x;
+         auto i2 = gcf[gcf_dim*gcf_dim*(GCF_GRID*sub_y+sub_x) + 
+                        gcf_dim*b+a].y;
          sum_r += r1*r2 - i1*i2; 
          sum_i += r1*i2 + r2*i1;
       }
@@ -154,8 +159,17 @@ void degridGPU(CmplxType* out, CmplxType* in, size_t npts, CmplxType *img, size_
    d_gcf += gcf_dim*(gcf_dim+1)/2;
 
    cudaEventRecord(start);
-   degrid_kernel<128>
-            <<<npts/32,dim3(gcf_dim,512/gcf_dim)>>>(d_out,d_in,npts,d_img,img_dim,d_gcf); 
+#define WINDOW 8192
+   std::cout << "img_dim = " << img_dim << std::endl;
+   int xmin = 0; int ymin = 0; 
+   for (int xmin=0; xmin+WINDOW <= img_dim; xmin += WINDOW) {
+   for (int ymin=0; ymin+WINDOW <= img_dim; ymin += WINDOW) {
+      std::cout << xmin << ", " << xmin+WINDOW << "   " << ymin << ", " << ymin+WINDOW << std::endl;
+      degrid_kernel<128>
+            <<<npts/32,dim3(gcf_dim,512/gcf_dim)>>>(d_out,d_in,npts,d_img,img_dim,d_gcf,
+                                                    xmin, xmin+WINDOW, ymin, ymin+WINDOW); 
+   }}
+   
    float kernel_time = getElapsed(start,stop);
    std::cout << "Processed " << npts << " complex points in " << kernel_time << " ms." << std::endl;
    std::cout << npts / 1000000.0 / kernel_time * gcf_dim * gcf_dim * 8 << "Gflops" << std::endl;
