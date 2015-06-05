@@ -39,7 +39,7 @@ void init_gcf(PRECISION2 *gcf, size_t size) {
 
 }
 
-void degridCPU(PRECISION2* out, PRECISION2 *in, size_t npts, PRECISION2 *img, size_t img_dim, PRECISION2 *gcf, size_t gcf_dim) {
+void degridCPU(PRECISION2* out, PRECISION2 *in, int npts, PRECISION2 *img, int img_dim, PRECISION2 *gcf, int gcf_dim, int gcf_grid) {
 //degrid on the CPU
 //  out (out) - the output values for each location
 //  in  (in)  - the locations to be interpolated 
@@ -50,41 +50,48 @@ void degridCPU(PRECISION2* out, PRECISION2 *in, size_t npts, PRECISION2 *img, si
 //  gcf_dim (in) - dimension of the GCF
 
    //offset gcf to point to the middle for cleaner code later
-   gcf += GCF_DIM*(GCF_DIM+1)/2;
+   gcf += gcf_dim*(gcf_dim/2)+gcf_dim/2;
+
 #pragma acc parallel loop copyout(out[0:NPOINTS]) copyin(in[0:NPOINTS],gcf[0:GCF_GRID*GCF_GRID*GCF_DIM*GCF_DIM],img[IMG_SIZE*IMG_SIZE]) gang
-#pragma omp parallel for
-   for(size_t n=0; n<NPOINTS; n++) {
+//#pragma omp parallel for
+   for(size_t n=0; n<npts; n++) {
       //std::cout << "in = " << in[n].x << ", " << in[n].y << std::endl;
-      int sub_x = floorf(GCF_GRID*(in[n].x-floorf(in[n].x)));
-      int sub_y = floorf(GCF_GRID*(in[n].y-floorf(in[n].y)));
+      int sub_x = floorf(gcf_grid*(in[n].x-floorf(in[n].x)));
+      int sub_y = floorf(gcf_grid*(in[n].y-floorf(in[n].y)));
       //std::cout << "sub = "  << sub_x << ", " << sub_y << std::endl;
       int main_x = floor(in[n].x); 
       int main_y = floor(in[n].y); 
       //std::cout << "main = " << main_x << ", " << main_y << std::endl;
-      PRECISION sum_r = 0.0;
-      PRECISION sum_i = 0.0;
+      auto sum_r = 0.0*out[0].x;
+      auto sum_i = sum_r;
       #pragma acc parallel loop collapse(2) reduction(+:sum_r,sum_i) vector
 #pragma omp parallel for collapse(2) reduction(+:sum_r, sum_i)
-      for (int a=-GCF_DIM/2; a<GCF_DIM/2 ;a++)
-      for (int b=-GCF_DIM/2; b<GCF_DIM/2 ;b++) {
-         PRECISION r1 = img[main_x+a+IMG_SIZE*(main_y+b)].x; 
-         PRECISION i1 = img[main_x+a+IMG_SIZE*(main_y+b)].y; 
-         PRECISION r2 = gcf[GCF_DIM*GCF_DIM*(GCF_GRID*sub_y+sub_x) + 
-                        GCF_DIM*b+a].x;
-         PRECISION i2 = gcf[GCF_DIM*GCF_DIM*(GCF_GRID*sub_y+sub_x) + 
-                        GCF_DIM*b+a].y;
+      for (int a=-gcf_dim/2; a<(gcf_dim+1)/2 ;a++)
+      for (int b=-gcf_dim/2; b<(gcf_dim+1)/2 ;b++) {
+         auto r1 = img[main_x+a+img_dim*(main_y+b)].x; 
+         auto i1 = img[main_x+a+img_dim*(main_y+b)].y; 
+         auto r2 = gcf[gcf_dim*gcf_dim*(gcf_grid*sub_y+sub_x) + 
+                        gcf_dim*b+a].x;
+         auto i2 = gcf[gcf_dim*gcf_dim*(gcf_grid*sub_y+sub_x) + 
+                        gcf_dim*b+a].y;
          if (main_x+a < 0 || main_y+b < 0 || 
-             main_x+a >= IMG_SIZE  || main_y+b >= IMG_SIZE) {
+             main_x+a >= img_dim  || main_y+b >= img_dim) {
+            //std::cout << main_x+a << ", " << main_y+b << " out of range." << std::endl;
          } else {
+            //std::cout << r1 << "*" << r2 << " = " << r1*r2 << std::endl;
+            //std::cout << i1 << "*" << i2 << " = " << i1*i2 << std::endl;
             sum_r += r1*r2 - i1*i2; 
             sum_i += r1*i2 + r2*i1;
+            //sum_r += 1.0;
+            //sum_i += a*1.0;
          }
+         //std::cout << "sum = " << sum_r << "+ i" << sum_i << std::endl;
       }
       out[n].x = sum_r;
       out[n].y = sum_i;
-      //std::cout << "val = " << out[n].r << "+ i" << out[n].i << std::endl;
+      //std::cout << "val = " << out[n].x << "+ i" << out[n].y << std::endl;
    } 
-   gcf -= GCF_DIM*(GCF_DIM+1)/2;
+   gcf -= gcf_dim*(gcf_dim/2)+gcf_dim/2;
 }
 template <class T,class Thalf>
 int w_comp_main(const void* A, const void* B) {
@@ -221,11 +228,11 @@ int main(void) {
 #endif
    std::cout << "sorted" << std::endl;
    
-   degridGPU(out,in,NPOINTS,img,IMG_SIZE,gcf,GCF_DIM);
+   degridGPU(out,in,NPOINTS,img,IMG_SIZE,gcf,GCF_DIM,GCF_GRID);
 #ifdef __CPU_CHECK
    std::cout << "Computing on CPU..." << std::endl;
    PRECISION2 *out_cpu=(PRECISION2*)malloc(sizeof(PRECISION2)*NPOINTS);
-   degridCPU(out_cpu,in,NPOINTS,img,IMG_SIZE,gcf,GCF_DIM);
+   degridCPU(out_cpu,in,NPOINTS,img,IMG_SIZE,gcf,GCF_DIM,GCF_GRID);
 #endif
 
 

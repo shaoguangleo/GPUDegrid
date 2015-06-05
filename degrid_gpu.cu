@@ -62,8 +62,8 @@ degrid_kernel(CmplxType* out, CmplxType* in, size_t npts, CmplxType* img,
       int main_y = floorf(inn.y); 
       auto sum_r = make_zero(img);
       auto sum_i = make_zero(img);
-      for(int a = threadIdx.x-gcf_dim/2;a<gcf_dim/2;a+=blockDim.x)
-      for(int b = -gcf_dim/2;b<gcf_dim/2;b++)
+      for(int a = threadIdx.x-gcf_dim/2;a<(gcf_dim+1)/2;a+=blockDim.x)
+      for(int b = -gcf_dim/2;b<(gcf_dim+1)/2;b++)
       {
          //auto this_img = img[main_x+a+img_dim*(main_y+b)]; 
          //auto r1 = this_img.x;
@@ -589,8 +589,67 @@ degrid_kernel_window(CmplxType* out, int2* in, size_t npts, CmplxType* img,
 }
 
 template <class CmplxType>
-void degridGPU(CmplxType* out, CmplxType* in, size_t npts, CmplxType *img, size_t img_dim, 
-               CmplxType *gcf, size_t gcf_dim) {
+void degridCPU_tmp(CmplxType* out, CmplxType *in, int npts, CmplxType *img, int img_dim, CmplxType *gcf, int gcf_dim, int gcf_grid) {
+//degrid on the CPU
+//  out (out) - the output values for each location
+//  in  (in)  - the locations to be interpolated 
+//  npts (in) - number of locations
+//  img (in) - the image
+//  img_dim (in) - dimension of the image
+//  gcf (in) - the gridding convolution function
+//  gcf_dim (in) - dimension of the GCF
+
+   //offset gcf to point to the middle for cleaner code later
+   gcf += gcf_dim*(gcf_dim/2)+gcf_dim/2;
+
+#pragma acc parallel loop copyout(out[0:npts]) copyin(in[0:npts],gcf[0:GCF_GRID*GCF_GRID*GCF_DIM*GCF_DIM],img[IMG_SIZE*IMG_SIZE]) gang
+//#pragma omp parallel for
+   for(size_t n=0; n<npts; n++) {
+      //std::cout << "in = " << in[n].x << ", " << in[n].y << std::endl;
+      fflush(0);
+      int sub_x = floorf(gcf_grid*(in[n].x-floorf(in[n].x)));
+      int sub_y = floorf(gcf_grid*(in[n].y-floorf(in[n].y)));
+      //std::cout << "sub = "  << sub_x << ", " << sub_y << std::endl;
+      int main_x = floor(in[n].x); 
+      int main_y = floor(in[n].y); 
+      //std::cout << "main = " << main_x << ", " << main_y << std::endl;
+      auto sum_r = 0.0*out[0].x;
+      auto sum_i = sum_r;
+      #pragma acc parallel loop collapse(2) reduction(+:sum_r,sum_i) vector
+//#pragma omp parallel for collapse(2) reduction(+:sum_r, sum_i)
+      for (int a=-gcf_dim/2; a<(gcf_dim+1)/2 ;a++)
+      for (int b=-gcf_dim/2; b<(gcf_dim+1)/2 ;b++) {
+         auto r1 = img[main_x+a+img_dim*(main_y+b)].x; 
+         auto i1 = img[main_x+a+img_dim*(main_y+b)].y; 
+         auto r2 = gcf[gcf_dim*gcf_dim*(gcf_grid*sub_y+sub_x) + 
+                        gcf_dim*b+a].x;
+         auto i2 = gcf[gcf_dim*gcf_dim*(gcf_grid*sub_y+sub_x) + 
+                        gcf_dim*b+a].y;
+         if (main_x+a < 0 || main_y+b < 0 || 
+             main_x+a >= img_dim  || main_y+b >= img_dim) {
+            //std::cout << main_x+a << ", " << main_y+b << " out of range." << std::endl;
+         } else {
+            //std::cout << r1 << "*" << r2 << " = " << r1*r2 << std::endl;
+            //std::cout << i1 << "*" << i2 << " = " << i1*i2 << std::endl;
+            sum_r += r1*r2 - i1*i2; 
+            sum_i += r1*i2 + r2*i1;
+            //sum_r += 1.0;
+            //sum_i += a*1.0;
+         }
+         //std::cout << "sum = " << sum_r << "+ i" << sum_i << std::endl;
+         //fflush(0);
+      }
+      out[n].x = sum_r;
+      out[n].y = sum_i;
+      //std::cout << "val = " << out[n].x << "+ i" << out[n].y << std::endl;
+      //fflush(0);
+   } 
+   gcf -= gcf_dim*(gcf_dim/2)+gcf_dim/2;
+}
+
+template <class CmplxType>
+void degridGPU(CmplxType* out, CmplxType* in, int npts, CmplxType *img, int img_dim, 
+               CmplxType *gcf, int gcf_dim, int gcf_grid) {
 //degrid on the GPU
 //  out (out) - the output values for each location
 //  in  (in)  - the locations to be interpolated 
@@ -602,6 +661,22 @@ void degridGPU(CmplxType* out, CmplxType* in, size_t npts, CmplxType *img, size_
 
    CmplxType *d_out, *d_in, *d_img, *d_gcf;
 
+   //For the call from Python, first verify that the parameters match
+   //TODO throw this error in Python
+   if (GCF_DIM != gcf_dim) {
+      std::cout << "ERROR: The parameter GCF_DIM from GPUDegrid/Defines.h does not" << std::endl;
+      std::cout << "match gcf_dim passed by Python (" << gcf_dim << ")." << std::endl;
+      return;
+   }
+   if (GCF_GRID != gcf_grid) {
+      std::cout << "The parameter GCF_GRID from GPUDegrid/Defines.h does not" << std::endl;
+      std::cout << "match Qpx passed by Python (" << gcf_grid << ")." << std::endl;
+      return;
+   }
+   if (IMG_SIZE != img_dim) {
+      std::cout << "The parameter IMG_SIZE from GPUDegrid/Defines.h does not" << std::endl;
+      std::cout << "match img_dim passed by Python (" << img_dim << ")." << std::endl;
+   }
    cudaEvent_t start, stop;
    cudaEventCreate(&start); cudaEventCreate(&stop);
 
@@ -611,18 +686,19 @@ void degridGPU(CmplxType* out, CmplxType* in, size_t npts, CmplxType *img, size_
    d_gcf = gcf;
    d_out = out;
    d_in = in;
-   std::cout << "img size = " << (img_dim*img_dim+2*img_dim*gcf_dim+2*gcf_dim)*
-                                                                 sizeof(CmplxType) << std::endl;
-   std::cout << "out size = " << sizeof(CmplxType)*npts << std::endl;
 #else
    //img is padded to avoid overruns. Subtract to find the real head
    img -= img_dim*gcf_dim+gcf_dim;
 
    //Pin CPU memory
    cudaHostRegister(img, sizeof(CmplxType)*(img_dim*img_dim+2*img_dim*gcf_dim+2*gcf_dim), cudaHostRegisterMapped);
+   CUDA_CHECK_ERR(__LINE__,__FILE__);
    cudaHostRegister(gcf, sizeof(CmplxType)*64*gcf_dim*gcf_dim, cudaHostRegisterMapped);
-   cudaHostRegister(out, sizeof(CmplxType)*npts, cudaHostRegisterMapped);
+   CUDA_CHECK_ERR(__LINE__,__FILE__);
+   //TODO Restore cudaHostRegister(out, sizeof(CmplxType)*npts, cudaHostRegisterMapped);
+   CUDA_CHECK_ERR(__LINE__,__FILE__);
    cudaHostRegister(in, sizeof(CmplxType)*npts, cudaHostRegisterMapped);
+   CUDA_CHECK_ERR(__LINE__,__FILE__);
 
    //Allocate GPU memory
    std::cout << "img size = " << (img_dim*img_dim+2*img_dim*gcf_dim+2*gcf_dim)*
@@ -650,7 +726,7 @@ void degridGPU(CmplxType* out, CmplxType* in, size_t npts, CmplxType *img, size_
    d_img += img_dim*gcf_dim+gcf_dim;
 #endif
    //offset gcf to point to the middle of the first GCF for cleaner code later
-   d_gcf += gcf_dim*(gcf_dim+1)/2;
+   d_gcf += gcf_dim*(gcf_dim/2)+gcf_dim/2;
 
 #ifdef __SCATTER
    int2* in_ints;
@@ -683,7 +759,7 @@ void degridGPU(CmplxType* out, CmplxType* in, size_t npts, CmplxType *img, size_
    //vis2ints<<<dim3(npts/64,8),dim3(GCF_DIM,GCF_DIM/8)>>>(d_in, in_ints, npts);
 #else
    cudaEventRecord(start);
-   if (GCF_DIM < 32) {
+   if (GCF_DIM <= 16) {
       degrid_kernel_small_gcf<GCF_DIM>
                <<<npts/32,dim3(32,32)>>>(d_out,d_in,npts,d_img,img_dim,d_gcf); 
    } else {
@@ -706,12 +782,12 @@ void degridGPU(CmplxType* out, CmplxType* in, size_t npts, CmplxType *img, size_
    //Unpin CPU memory
    cudaHostUnregister(img);
    cudaHostUnregister(gcf);
-   cudaHostUnregister(out);
+   //TODO Restore cudaHostUnregister(out);
    cudaHostUnregister(in);
 
    //Restore d_img and d_gcf for deallocation
    d_img -= img_dim*gcf_dim+gcf_dim;
-   d_gcf -= gcf_dim*(gcf_dim+1)/2;
+   d_gcf -= gcf_dim*(gcf_dim/2)+gcf_dim/2;
    cudaFree(d_out);
    cudaFree(d_img);
 #ifdef __SCATTER
@@ -722,7 +798,11 @@ void degridGPU(CmplxType* out, CmplxType* in, size_t npts, CmplxType *img, size_
    cudaEventDestroy(start); cudaEventDestroy(stop);
    CUDA_CHECK_ERR(__LINE__,__FILE__);
 }
-template void degridGPU<double2>(double2* out, double2* in, size_t npts, double2 *img, 
-                                 size_t img_dim, double2 *gcf, size_t gcf_dim); 
-template void degridGPU<float2>(float2* out, float2* in, size_t npts, float2 *img, 
-                                size_t img_dim, float2 *gcf, size_t gcf_dim); 
+template void degridGPU<double2>(double2* out, double2* in, int npts, double2 *img, 
+                                 int img_dim, double2 *gcf, int gcf_dim, int gcf_grid); 
+template void degridGPU<float2>(float2* out, float2* in, int npts, float2 *img, 
+                                int img_dim, float2 *gcf, int gcf_dim, int gcf_grid); 
+template void degridCPU_tmp<double2>(double2* out, double2* in, int npts, double2 *img, 
+                                 int img_dim, double2 *gcf, int gcf_dim, int gcf_grid); 
+template void degridCPU_tmp<float2>(float2* out, float2* in, int npts, float2 *img, 
+                                int img_dim, float2 *gcf, int gcf_dim, int gcf_grid); 

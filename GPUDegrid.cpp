@@ -119,8 +119,8 @@ static PyObject* GPUDegrid_convdegrid(PyObject* self, PyObject* args)
   if (0 != extractComplexList(gcf, &gcf_c, 5)) return Py_BuildValue("");
   out_c = (double2*)malloc(sizeof(double2)*npts);
 #if 1
-  degridGPU(out_c, (double2*)in_c, npts, img_c, img_size, gcf_c, gcf_dim); 
-  printf("Done with degridGPU\n"); fflush(0);
+  degridGPU(out_c, (double2*)in_c, npts, img_c, img_size, 
+                gcf_c, gcf_dim, Qpx); 
 #else
   for (q=0;q<npts;q++) {
      out_c[q].x = 2.0*in_c[2*q];
@@ -130,7 +130,6 @@ static PyObject* GPUDegrid_convdegrid(PyObject* self, PyObject* args)
 
   out = PyList_New(0);
   makeComplexList(out_c, npts, out);
-  printf("len(out) = %lu\n", PyList_Size(out));
 
   return Py_BuildValue("O", out);
 }
